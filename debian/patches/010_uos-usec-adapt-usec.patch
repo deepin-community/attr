@@ -1,0 +1,70 @@
+Index: attr_commit/tools/getfattr.c
+===================================================================
+--- attr_commit.orig/tools/getfattr.c
++++ attr_commit/tools/getfattr.c
+@@ -281,7 +281,10 @@ int print_attribute(const char *path, co
+ 		*header_printed = 1;
+ 	}
+ 
+-	if (opt_value_only)
++
++	if (strcmp(name,"security.usec_user") == 0)
++		printf("%s=0x%08x\n", name, *((unsigned int*)value));
++	else if (opt_value_only)
+ 		fwrite(value, length, 1, stdout);
+ 	else if (opt_dump) {
+ 		const char *enc = encode(value, &length);
+Index: attr_commit/tools/setfattr.c
+===================================================================
+--- attr_commit.orig/tools/setfattr.c
++++ attr_commit/tools/setfattr.c
+@@ -268,12 +268,48 @@ synopsis:
+ 	return 2;
+ }
+ 
++static int charPtrToUint32(const char* str, unsigned int *value) {
++    if (str == NULL) {
++        return -1;
++    }
++    long longValue = 0;
++    char* endptr;
++    if (strncmp(str, "0x", 2) == 0 || strncmp(str, "0X", 2) == 0)
++        longValue = strtoull(str + 2, &endptr, 16);
++    else
++        longValue = strtoull(str, &endptr, 10);
++
++    if (endptr == str) {
++        return -EINVAL;
++    }
++
++    if (*endptr != '\0') {
++        return -EINVAL;
++    }
++
++    if (errno == ERANGE || longValue > 0xffffffff) {
++        return -EINVAL;
++    }
++
++    *value = (unsigned int)longValue;
++    return 0;
++}
++
+ int do_set(const char *path, const char *name, const char *value)
+ {
+ 	size_t size = 0;
+ 	int error;
+ 
+-	if (value) {
++    if (strcmp(name, "security.usec_user") == 0) {
++        static unsigned int value32;
++        if (charPtrToUint32(value, &value32) != 0) {
++            fprintf(stderr, "%s: %s: invalid value.\n",
++                progname, xquote(path, "\n\r"));
++            return 1;
++        }
++        value = (char *)&value32;
++        size = sizeof(value32);
++    } else if (value) {
+ 		size = strlen(value);
+ 		if (!opt_raw)
+ 			value = decode(value, &size);

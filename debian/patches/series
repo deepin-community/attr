@@ -8,3 +8,4 @@ man-pages-typo-fixes.patch
 man-attr-no-xfs-specific.patch
 man-fix-macros.patch
 gettext-musl.patch
+010_uos-usec-adapt-usec.patch

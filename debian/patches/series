@@ -9,3 +9,4 @@ man-attr-no-xfs-specific.patch
 man-fix-macros.patch
 gettext-musl.patch
 0001-man-Use-apostrophe-instead-of-acute-accent.patch
+010_uos-usec-adapt-usec.patch

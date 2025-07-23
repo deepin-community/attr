@@ -1,0 +1,170 @@
+Index: attr_commit/tools/getfattr.c
+===================================================================
+--- attr_commit.orig/tools/getfattr.c
++++ attr_commit/tools/getfattr.c
+@@ -86,10 +86,28 @@ int do_getxattr(const char *path, const
+ 		getxattr : lgetxattr)(path, name, value, size);
+ }
+ 
++static const char* usec_list[] = {"security.usec_file", "security.usec_proc",
++                "security.usec_user", "security.usec_smodel", NULL};
+ int do_listxattr(const char *path, char *list, size_t size)
+ {
+-	return ((walk_flags & WALK_TREE_DEREFERENCE) ?
++	int len = ((walk_flags & WALK_TREE_DEREFERENCE) ?
+ 		listxattr : llistxattr)(path, list, size);
++
++    if (len != 0 )
++        return len;
++
++    int total = 0;
++    for (int i = 0; usec_list[i] != NULL; i++) {
++        len = do_getxattr(path, usec_list[i], NULL, 0);
++        if (len > 0) {
++            if (list) {
++                strcpy(list + total, usec_list[i]);
++            }
++            total += strlen(usec_list[i]) + 1;
++        }
++    }
++
++    return total > 0 ? total : 0;
+ }
+ 
+ const char *strerror_ea(int err)
+@@ -229,6 +247,45 @@ const char *encode(const char *value, si
+ 	return encoded;
+ }
+ 
++static int trim_usec_attr(const char *full_context, char *output_buffer, size_t buffer_size)
++{
++    if (full_context == NULL || output_buffer == NULL || buffer_size == 0) {
++        return -1;
++    }
++
++    const char *first_colon = strchr(full_context, ':');
++    if (first_colon == NULL) {
++        return -1;
++    }
++
++    const char *second_colon = strchr(first_colon + 1, ':');
++    if (second_colon == NULL) {
++        return -1;
++    }
++
++    const char *third_colon = strchr(second_colon + 1, ':');
++    size_t type_start_index = (second_colon - full_context) + 1;
++    size_t type_end_index;
++
++    if (third_colon != NULL) {
++        type_end_index = (third_colon - full_context);
++    } else {
++        type_end_index = strlen(full_context);
++    }
++
++    size_t type_length = type_end_index - type_start_index;
++
++    if (type_length >= buffer_size) {
++        return -1;
++    }
++    output_buffer[0] = '"';
++    strncpy(output_buffer+1, full_context + type_start_index, type_length);
++    output_buffer[type_length+1] = '"';
++    output_buffer[type_length+2] = '\0';
++
++    return 0;
++}
++
+ int print_attribute(const char *path, const char *name, int *header_printed)
+ {
+ 	static char *value;
+@@ -281,13 +338,32 @@ int print_attribute(const char *path, co
+ 		*header_printed = 1;
+ 	}
+ 
+-	if (opt_value_only)
++
++	if (strcmp(name,"security.usec_user") == 0) {
++		printf("%s=0x%08x\n", name, *((unsigned int*)value));
++	} else if(strcmp(name,"security.usec_smodel") == 0) {
++ 		unsigned int model = *((unsigned int*)value);
++		unsigned short ilevel = (model >> 16) & 0xFFFF;
++		unsigned short slevel = model & 0xFFFF;
++		printf("%s=s%d, i%d\n", name, slevel!=16384?slevel:0 , ilevel!=16384?ilevel:15);
++	}
++	else if (opt_value_only)
+ 		fwrite(value, length, 1, stdout);
+ 	else if (opt_dump) {
+ 		const char *enc = encode(value, &length);
+ 		
+-		if (enc)
+-			printf("%s=%s\n", xquote(name, "=\n\r"), enc);
++		if (enc) {
++            if (strncmp(name, "security.usec_", 14) == 0) {
++                char context[256];
++                if (trim_usec_attr(enc, context, sizeof(context)) == 0) {
++                    printf("%s=%s\n", xquote(name, "=\n\r"), context);
++                } else {
++                    printf("%s=%s\n", xquote(name, "=\n\r"), enc);
++                }
++            } else {
++                printf("%s=%s\n", xquote(name, "=\n\r"), enc);
++            }
++        }
+ 	} else
+ 		puts(xquote(name, "=\n\r"));
+ 
+Index: attr_commit/tools/setfattr.c
+===================================================================
+--- attr_commit.orig/tools/setfattr.c
++++ attr_commit/tools/setfattr.c
+@@ -268,12 +268,48 @@ synopsis:
+ 	return 2;
+ }
+ 
++static int charPtrToUint32(const char* str, unsigned int *value) {
++    if (str == NULL) {
++        return -1;
++    }
++    long longValue = 0;
++    char* endptr;
++    if (strncmp(str, "0x", 2) == 0 || strncmp(str, "0X", 2) == 0)
++        longValue = strtoull(str + 2, &endptr, 16);
++    else
++        longValue = strtoull(str, &endptr, 10);
++
++    if (endptr == str) {
++        return -EINVAL;
++    }
++
++    if (*endptr != '\0') {
++        return -EINVAL;
++    }
++
++    if (errno == ERANGE || longValue > 0xffffffff) {
++        return -EINVAL;
++    }
++
++    *value = (unsigned int)longValue;
++    return 0;
++}
++
+ int do_set(const char *path, const char *name, const char *value)
+ {
+ 	size_t size = 0;
+ 	int error;
+ 
+-	if (value) {
++    if (strcmp(name, "security.usec_user") == 0 || strcmp(name, "security.usec_smodel") == 0) {
++        static unsigned int value32;
++        if (charPtrToUint32(value, &value32) != 0) {
++            fprintf(stderr, "%s: %s: invalid value.\n",
++                progname, xquote(path, "\n\r"));
++            return 1;
++        }
++        value = (char *)&value32;
++        size = sizeof(value32);
++    } else if (value) {
+ 		size = strlen(value);
+ 		if (!opt_raw)
+ 			value = decode(value, &size);

@@ -16,8 +16,10 @@ Forwarded: not-needed
 Last-Update: 2026-07-03
 ---
 
---- a/tools/getfattr.c	2026-07-03 13:29:12.165934793 +0800
-+++ b/tools/getfattr.c	2026-07-03 13:29:12.174091818 +0800
+Index: attr-fix/tools/getfattr.c
+===================================================================
+--- attr-fix.orig/tools/getfattr.c
++++ attr-fix/tools/getfattr.c
 @@ -24,6 +24,7 @@
  #include <stdio.h>
  #include <stdlib.h>
@@ -34,7 +36,7 @@ Last-Update: 2026-07-03
  #include "walk_tree.h"
  #include "misc.h"
  
-@@ -55,19 +57,20 @@
+@@ -55,19 +57,20 @@ static const struct option long_options[
  	{ NULL,			0, 0, 0 }
  };
  
@@ -68,7 +70,7 @@ Last-Update: 2026-07-03
  
  
  static const char *xquote(const char *str, const char *quote_chars)
-@@ -80,19 +83,7 @@
+@@ -80,19 +83,7 @@ static const char *xquote(const char *st
  	return q;
  }
  
@@ -89,7 +91,7 @@ Last-Update: 2026-07-03
  {
  #ifdef __linux__
  	/* The Linux kernel does not define ENOATTR, but maps it to ENODATA. */
-@@ -102,12 +93,12 @@
+@@ -102,12 +93,12 @@ const char *strerror_ea(int err)
  	return strerror(err);
  }
  
@@ -104,7 +106,7 @@ Last-Update: 2026-07-03
  {
  	size_t n, nonpr = 0;
  
-@@ -122,7 +113,7 @@
+@@ -122,7 +113,7 @@ int well_enough_printable(const char *va
  	return (size >= nonpr*8);  /* no more than 1/8 non-printable chars */
  }
  
@@ -113,7 +115,7 @@ Last-Update: 2026-07-03
  {
  	static char *encoded;
  	static size_t encoded_size;
-@@ -229,7 +220,9 @@
+@@ -229,7 +220,9 @@ const char *encode(const char *value, si
  	return encoded;
  }
  
@@ -124,7 +126,7 @@ Last-Update: 2026-07-03
  {
  	static char *value;
  	static size_t value_size;
-@@ -237,9 +230,9 @@
+@@ -237,9 +230,9 @@ int print_attribute(const char *path, co
  	size_t length = 0;
  
  	if (opt_dump || opt_value_only) {
@@ -136,7 +138,7 @@ Last-Update: 2026-07-03
  			fprintf(stderr, "%s: %s\n", xquote(name, "\n\r"),
  				strerror_ea(errno));
  			return 1;
-@@ -249,9 +242,10 @@
+@@ -249,9 +242,10 @@ int print_attribute(const char *path, co
  			had_errors++;
  			return 1;
  		}
@@ -149,7 +151,7 @@ Last-Update: 2026-07-03
  			fprintf(stderr, "%s: %s\n", xquote(name, "\n\r"),
  				strerror_ea(errno));
  			return 1;
-@@ -260,24 +254,20 @@
+@@ -260,24 +254,20 @@ int print_attribute(const char *path, co
  	}
  
  	if (opt_strip_leading_slash) {
@@ -181,7 +183,7 @@ Last-Update: 2026-07-03
  		*header_printed = 1;
  	}
  
-@@ -294,7 +284,8 @@
+@@ -294,7 +284,8 @@ int print_attribute(const char *path, co
  	return 0;
  }
  
@@ -191,7 +193,7 @@ Last-Update: 2026-07-03
  {
  	static char *list;
  	static size_t list_size;
-@@ -304,10 +295,10 @@
+@@ -304,10 +295,10 @@ int list_attributes(const char *path, in
  	ssize_t length;
  	char *l;
  
@@ -205,7 +207,7 @@ Last-Update: 2026-07-03
  		had_errors++;
  		return 1;
  	} else if (length == 0)
-@@ -319,9 +310,10 @@
+@@ -319,9 +310,10 @@ int list_attributes(const char *path, in
  		return 1;
  	}
  
@@ -218,7 +220,7 @@ Last-Update: 2026-07-03
  		had_errors++;
  		return 1;
  	}
-@@ -351,34 +343,51 @@
+@@ -351,34 +343,51 @@ int list_attributes(const char *path, in
  		int n;
  
  		for (n = 0; n < num_names; n++)
@@ -278,7 +280,7 @@ Last-Update: 2026-07-03
  {
  	printf(_("%s %s -- get extended attributes\n"),
  	       progname, VERSION);
-@@ -435,7 +444,7 @@
+@@ -435,7 +444,7 @@ int main(int argc, char *argv[])
  				return 0;
  
  			case 'h': /* do not dereference symlinks */
@@ -287,7 +289,7 @@ Last-Update: 2026-07-03
  				break;
  
  			case 'n':  /* get named attribute */
-@@ -492,8 +501,8 @@
+@@ -492,8 +501,8 @@ int main(int argc, char *argv[])
  	}
  
  	while (optind < argc) {
@@ -298,8 +300,10 @@ Last-Update: 2026-07-03
  		optind++;
  	}
  
---- a/tools/setfattr.c	2026-07-03 13:29:12.167814398 +0800
-+++ b/tools/setfattr.c	2026-07-03 13:29:12.175091802 +0800
+Index: attr-fix/tools/setfattr.c
+===================================================================
+--- attr-fix.orig/tools/setfattr.c
++++ attr-fix/tools/setfattr.c
 @@ -30,19 +30,25 @@
  #include <ctype.h>
  #include <libgen.h>
@@ -327,7 +331,7 @@ Last-Update: 2026-07-03
  	{ "restore",		1, 0, 'B' },
  	{ "raw",		0, 0, CHAR_MAX + 1 },
  	{ "version",		0, 0, 'V' },
-@@ -50,24 +56,25 @@
+@@ -50,24 +56,25 @@ static const struct option long_options[
  	{ NULL,			0, 0, 0 }
  };
  
@@ -370,7 +374,7 @@ Last-Update: 2026-07-03
  {
  #ifdef __linux__
  	/* The Linux kernel does not define ENOATTR, but maps it to ENODATA. */
-@@ -87,25 +94,20 @@
+@@ -87,25 +94,20 @@ static const char *xquote(const char *st
  	return q;
  }
  
@@ -406,7 +410,7 @@ Last-Update: 2026-07-03
  	if (strcmp(filename, "-") == 0)
  		file = stdin;
  	else {
-@@ -140,20 +142,85 @@
+@@ -140,20 +142,85 @@ int restore(const char *filename)
  		} else
  			l += 8;
  		l = unquote(l);
@@ -495,7 +499,7 @@ Last-Update: 2026-07-03
  		if (l == NULL)
  			break;
  		line++;
-@@ -166,8 +233,12 @@
+@@ -166,8 +233,12 @@ int restore(const char *filename)
  	}
  
  cleanup:
@@ -510,7 +514,7 @@ Last-Update: 2026-07-03
  	if (file != stdin)
  		fclose(file);
  	if (status)
-@@ -175,16 +246,18 @@
+@@ -175,16 +246,18 @@ cleanup:
  	return status;
  }
  
@@ -530,7 +534,7 @@ Last-Update: 2026-07-03
  "      --restore=file      restore extended attributes\n"
  "      --raw               attribute value is not encoded\n"
  "      --version           print version and exit\n"
-@@ -193,6 +266,8 @@
+@@ -193,6 +266,8 @@ void help(void)
  
  int main(int argc, char *argv[])
  {
@@ -539,7 +543,7 @@ Last-Update: 2026-07-03
  	int opt;
  
  	progname = basename(argv[0]);
-@@ -206,6 +281,9 @@
+@@ -206,6 +281,9 @@ int main(int argc, char *argv[])
  		                  long_options, NULL)) != -1) {
  		switch(opt) {
  			case 'n':  /* attribute name */
@@ -549,7 +553,7 @@ Last-Update: 2026-07-03
  				if (opt_name || opt_remove)
  					goto synopsis;
  				opt_name = optarg;
-@@ -217,16 +295,25 @@
+@@ -217,16 +295,25 @@ int main(int argc, char *argv[])
  				break;
  
  			case 'v':  /* attribute value */
@@ -575,7 +579,7 @@ Last-Update: 2026-07-03
  				if (opt_name || opt_set)
  					goto synopsis;
  				opt_name = optarg;
-@@ -234,8 +321,24 @@
+@@ -234,8 +321,24 @@ int main(int argc, char *argv[])
  				break;
  
  			case 'B':  /* restore */
@@ -602,7 +606,7 @@ Last-Update: 2026-07-03
  				break;
  
  			case 'V':
-@@ -253,23 +356,35 @@
+@@ -253,23 +356,35 @@ int main(int argc, char *argv[])
  	if (!(((opt_remove || opt_set) && optind < argc) || opt_restore))
  		goto synopsis;
  
@@ -644,7 +648,7 @@ Last-Update: 2026-07-03
  	size_t size = 0;
  	int error;
  
-@@ -281,20 +396,21 @@
+@@ -281,20 +396,21 @@ int do_set(const char *path, const char
  			return 1;
  	}
  	if (opt_set || opt_restore)
@@ -670,7 +674,7 @@ Last-Update: 2026-07-03
  {
  	static char *decoded;
  	static size_t decoded_size;
-@@ -444,7 +560,7 @@
+@@ -444,7 +560,7 @@ const char *decode(const char *value, si
  	return decoded;
  }
  
@@ -679,7 +683,7 @@ Last-Update: 2026-07-03
  {
  	if (c >= '0' && c <= '9')
  		return c - '0';
-@@ -456,7 +572,7 @@
+@@ -456,7 +572,7 @@ int hex_digit(char c)
  		return -1;
  }
  
@@ -688,9 +692,11 @@ Last-Update: 2026-07-03
  {
  	if (c >= 'A' && c <= 'Z')
  		return c - 'A';
---- a/man/man1/getfattr.1	2026-07-03 13:29:12.169562186 +0800
-+++ b/man/man1/getfattr.1	2026-07-03 13:29:12.176091786 +0800
-@@ -79,8 +79,7 @@
+Index: attr-fix/man/man1/getfattr.1
+===================================================================
+--- attr-fix.orig/man/man1/getfattr.1
++++ attr-fix/man/man1/getfattr.1
+@@ -79,8 +79,7 @@ while strings encoded as hexadecimal and
  .TP
  .BR \-h ", " \-\-no-dereference
  Do not dereference symlinks. Instead of the file a symlink refers to, the
@@ -698,9 +704,9 @@ Last-Update: 2026-07-03
 -traverse symlinks to directories.
 +symlink itself is examined.
  .TP
- .BR \-m " \f2pattern\f1, " \-\-match "=\f2pattern\f1"
+ .BR \-m " \fIpattern\fR, " \-\-match "=\fIpattern\fR"
  Only include attributes with names matching the regular expression
-@@ -102,18 +101,19 @@
+@@ -102,18 +101,19 @@ Dump out the raw extended attribute valu
  .TP
  .BR \-R ", " \-\-recursive
  List the attributes of all files and directories recursively.
@@ -726,33 +732,34 @@ Last-Update: 2026-07-03
  .TP
  .B \-\-version
  Print the version of
---- a/man/man1/setfattr.1	2026-07-03 13:29:12.171667576 +0800
-+++ b/man/man1/setfattr.1	2026-07-03 13:29:12.177091771 +0800
-@@ -30,7 +30,7 @@
+Index: attr-fix/man/man1/setfattr.1
+===================================================================
+--- attr-fix.orig/man/man1/setfattr.1
++++ attr-fix/man/man1/setfattr.1
+@@ -30,7 +30,7 @@ setfattr \- set extended attributes of f
  .nf
- \f3setfattr\f1 [\f3\-h\f1] \f3\-n name\f1 [\f3\-v value\f1] \f3pathname\f1...
- \f3setfattr\f1 [\f3\-h\f1] \f3\-x name\f1 \f3pathname\f1...
--\f3setfattr\f1 [\f3\-h\f1] \f3\-\-restore=file\f1
-+\f3setfattr\f1 [\f3\-hP\f1] \f3\-\-restore=file\f1
+ \fBsetfattr\fR [\fB\-h\fR] \fB\-n name\fR [\fB\-v value\fR] \fBpathname\fR...
+ \fBsetfattr\fR [\fB\-h\fR] \fB\-x name\fR \fBpathname\fR...
+-\fBsetfattr\fR [\fB\-h\fR] \fB\-\-restore=file\fR
++\fBsetfattr\fR [\fB\-hP\fR] \fB\-\-restore=file\fR
  .fi
  .SH DESCRIPTION
- The 
-@@ -62,8 +62,11 @@
- .BR \-h ", " \-\-no-dereference
- Do not follow symlinks.  If
- .I pathname
--is a symbolic link, it is not followed, but is instead itself the
--inode being modified.
-+is a symbolic link, it is not followed, but is instead modified itself.
-+.TP
+ The
+@@ -74,6 +74,10 @@ is a symbolic link,
+ it is not followed,
+ but is instead itself the inode being modified.
+ .TP
 +.BR \-P ", " \-\-physical
 +Do not traverse symbolic links in pathnames during a restore.  Can be combined
 +with option \-h.
- .TP
- .BR \-\-restore =\f2file\f1
++.TP
+ .BI \-\-restore= file
  Restores extended attributes from file.
---- a/test/Makemodule.am	2026-07-03 13:29:12.173963691 +0800
-+++ b/test/Makemodule.am	2026-07-03 13:29:12.178091755 +0800
+ The file must be in the format generated by the
+Index: attr-fix/test/Makemodule.am
+===================================================================
+--- attr-fix.orig/test/Makemodule.am
++++ attr-fix/test/Makemodule.am
 @@ -1,6 +1,13 @@
 +TEST_EXTENSIONS = .run
 +
@@ -769,7 +776,7 @@ Last-Update: 2026-07-03
  
  EXTRA_DIST += \
  	test/README \
-@@ -9,5 +16,7 @@
+@@ -9,5 +16,7 @@ EXTRA_DIST += \
  	$(TESTS)
  
  # Make sure translations don't break tests when matching output.
@@ -779,8 +786,10 @@ Last-Update: 2026-07-03
 +	export LC_MESSAGES=C; \
 +	PATH="$(abs_top_builddir):$$PATH";
 +RUN_LOG_COMPILER = $(srcdir)/test/run
---- /dev/null	2026-07-03 11:23:39.371485832 +0800
-+++ b/test/restore.run	2026-07-03 13:29:12.177091771 +0800
+Index: attr-fix/test/restore.run
+===================================================================
+--- /dev/null
++++ attr-fix/test/restore.run
 @@ -0,0 +1,19 @@
 +	$ mkdir d
 +	$ touch d/f

@@ -8,3 +8,7 @@ local/0004-man-Clarify-attr-1-manual-page.patch
 local/0005-man-Mention-the-origins-of-ENOATTR.patch
 local/0006-man-Improve-markup-and-editorial-changes-for-setfatt.patch
 local/0007-man-Use-f-letter-instead-of-f-number-to-select-fonts.patch
+# CVE-2026-54371 Infrastructure
+local/0008-symlink-safe-xattr-infrastructure.patch
+# CVE-2026-54371 Hardening
+local/0009-harden-getfattr-setfattr.patch

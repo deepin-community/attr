@@ -1,0 +1,803 @@
+Description: Fix CVE-2026-54371: symlink traversal in getfattr/setfattr
+ Harden getfattr and setfattr with AT_SYMLINK_NOFOLLOW and
+ openat2(RESOLVE_NO_SYMLINKS). Fix setfattr --restore path handling.
+Author: Andreas Gruenbacher <agruenba@redhat.com>
+Origin: upstream, https://git.savannah.nongnu.org/git/attr.git
+Forwarded: not-needed
+Last-Update: 2026-07-03
+---
+
+Description: Fix CVE-2026-54371: symlink traversal in getfattr/setfattr
+ Harden getfattr and setfattr with AT_SYMLINK_NOFOLLOW and
+ openat2(RESOLVE_NO_SYMLINKS). Fix setfattr --restore path handling.
+Author: Andreas Gruenbacher <agruenba@redhat.com>
+Origin: upstream, https://git.savannah.nongnu.org/git/attr.git
+Forwarded: not-needed
+Last-Update: 2026-07-03
+---
+
+--- a/tools/getfattr.c	2026-07-03 13:29:12.165934793 +0800
++++ b/tools/getfattr.c	2026-07-03 13:29:12.174091818 +0800
+@@ -24,6 +24,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <fcntl.h>
+ #include <errno.h>
+ #include <ctype.h>
+ #include <getopt.h>
+@@ -32,6 +33,7 @@
+ #include <libgen.h>
+ #include <sys/xattr.h>
+ 
++#include "xattrat_compat.h"
+ #include "walk_tree.h"
+ #include "misc.h"
+ 
+@@ -55,19 +57,20 @@
+ 	{ NULL,			0, 0, 0 }
+ };
+ 
+-int walk_flags = WALK_TREE_DEREFERENCE;
+-int opt_dump;  /* dump attribute values (or only list the names) */
+-char *opt_name;  /* dump named attributes */
+-char *opt_name_pattern = "^user\\.";  /* include only matching names */
+-char *opt_encoding;  /* encode values automatically (NULL), or as "text",
+-                        "hex", or "base64" */
+-char opt_value_only;  /* dump the value only, without any decoration */
+-int opt_strip_leading_slash = 1;  /* strip leading '/' from path names */
+-
+-const char *progname;
+-int absolute_warning;
+-int had_errors;
+-regex_t name_regex;
++static enum walk_flags walk_flags = 0;
++static int at_flags = 0;
++static int opt_dump;  /* dump attribute values (or only list the names) */
++static char *opt_name;  /* dump named attributes */
++static char *opt_name_pattern = "^user\\.";  /* include only matching names */
++static char *opt_encoding;  /* encode values automatically (NULL), or as "text",
++                               "hex", or "base64" */
++static char opt_value_only;  /* dump the value only, without any decoration */
++static int opt_strip_leading_slash = 1;  /* strip leading '/' from path names */
++
++static const char *progname;
++static int absolute_warning;
++static int had_errors;
++static regex_t name_regex;
+ 
+ 
+ static const char *xquote(const char *str, const char *quote_chars)
+@@ -80,19 +83,7 @@
+ 	return q;
+ }
+ 
+-int do_getxattr(const char *path, const char *name, void *value, size_t size)
+-{
+-	return ((walk_flags & WALK_TREE_DEREFERENCE) ?
+-		getxattr : lgetxattr)(path, name, value, size);
+-}
+-
+-int do_listxattr(const char *path, char *list, size_t size)
+-{
+-	return ((walk_flags & WALK_TREE_DEREFERENCE) ?
+-		listxattr : llistxattr)(path, list, size);
+-}
+-
+-const char *strerror_ea(int err)
++static const char *strerror_ea(int err)
+ {
+ #ifdef __linux__
+ 	/* The Linux kernel does not define ENOATTR, but maps it to ENODATA. */
+@@ -102,12 +93,12 @@
+ 	return strerror(err);
+ }
+ 
+-int pstrcmp(const void *a, const void *b)
++static int pstrcmp(const void *a, const void *b)
+ {
+ 	return strcmp(*(const char **)a, *(const char **)b);
+ }
+ 
+-int well_enough_printable(const char *value, size_t size)
++static int well_enough_printable(const char *value, size_t size)
+ {
+ 	size_t n, nonpr = 0;
+ 
+@@ -122,7 +113,7 @@
+ 	return (size >= nonpr*8);  /* no more than 1/8 non-printable chars */
+ }
+ 
+-const char *encode(const char *value, size_t *size)
++static const char *encode(const char *value, size_t *size)
+ {
+ 	static char *encoded;
+ 	static size_t encoded_size;
+@@ -229,7 +220,9 @@
+ 	return encoded;
+ }
+ 
+-int print_attribute(const char *path, const char *name, int *header_printed)
++static int print_attribute(int dirfd, const char *pathname,
++			   const char *fullname, const char *name,
++			   int *header_printed)
+ {
+ 	static char *value;
+ 	static size_t value_size;
+@@ -237,9 +230,9 @@
+ 	size_t length = 0;
+ 
+ 	if (opt_dump || opt_value_only) {
+-		rval = do_getxattr(path, name, NULL, 0);
++		rval = getxattrat(dirfd, pathname, at_flags, name, NULL, 0);
+ 		if (rval < 0) {
+-			fprintf(stderr, "%s: ", xquote(path, "\n\r"));
++			fprintf(stderr, "%s: ", xquote(fullname, "\n\r"));
+ 			fprintf(stderr, "%s: %s\n", xquote(name, "\n\r"),
+ 				strerror_ea(errno));
+ 			return 1;
+@@ -249,9 +242,10 @@
+ 			had_errors++;
+ 			return 1;
+ 		}
+-		rval = do_getxattr(path, name, value, value_size);
++		rval = getxattrat(dirfd, pathname, at_flags, name, value,
++				   value_size);
+ 		if (rval < 0) {
+-			fprintf(stderr, "%s: ", xquote(path, "\n\r"));
++			fprintf(stderr, "%s: ", xquote(fullname, "\n\r"));
+ 			fprintf(stderr, "%s: %s\n", xquote(name, "\n\r"),
+ 				strerror_ea(errno));
+ 			return 1;
+@@ -260,24 +254,20 @@
+ 	}
+ 
+ 	if (opt_strip_leading_slash) {
+-		if (*path == '/') {
++		if (*fullname == '/') {
+ 			if (!absolute_warning) {
+-				fprintf(stderr, _("%s: Removing leading '/' "
+-					"from absolute path names\n"),
++				fprintf(stderr, _("%s: Removing leading "
++					"'/' from absolute path names\n"),
+ 					progname);
+ 				absolute_warning = 1;
+ 			}
+-			while (*path == '/')
+-				path++;
+-		} else if (*path == '.' && *(path+1) == '/')
+-			while (*++path == '/')
+-				/* nothing */ ;
+-		if (*path == '\0')
+-			path = ".";
++			while (*fullname == '/')
++				fullname++;
++		}
+ 	}
+ 
+ 	if (!*header_printed && !opt_value_only) {
+-		printf("# file: %s\n", xquote(path, "\n\r"));
++		printf("# file: %s\n", xquote(fullname, "\n\r"));
+ 		*header_printed = 1;
+ 	}
+ 
+@@ -294,7 +284,8 @@
+ 	return 0;
+ }
+ 
+-int list_attributes(const char *path, int *header_printed)
++static int list_attributes(int dirfd, const char *pathname,
++			   const char *fullname, int *header_printed)
+ {
+ 	static char *list;
+ 	static size_t list_size;
+@@ -304,10 +295,10 @@
+ 	ssize_t length;
+ 	char *l;
+ 
+-	length = do_listxattr(path, NULL, 0);
++	length = listxattrat(dirfd, pathname, at_flags, NULL, 0);
+ 	if (length < 0) {
+-		fprintf(stderr, "%s: %s: %s\n", progname, xquote(path, "\n\r"),
+-			strerror_ea(errno));
++		fprintf(stderr, "%s: %s: %s\n", progname,
++			xquote(fullname, "\n\r"), strerror_ea(errno));
+ 		had_errors++;
+ 		return 1;
+ 	} else if (length == 0)
+@@ -319,9 +310,10 @@
+ 		return 1;
+ 	}
+ 
+-	length = do_listxattr(path, list, list_size);
++	length = listxattrat(dirfd, pathname, at_flags, list, list_size);
+ 	if (length < 0) {
+-		perror(xquote(path, "\n\r"));
++		fprintf(stderr, "%s: %s: %s\n", progname,
++			xquote(fullname, "\n\r"), strerror_ea(errno));
+ 		had_errors++;
+ 		return 1;
+ 	}
+@@ -351,34 +343,51 @@
+ 		int n;
+ 
+ 		for (n = 0; n < num_names; n++)
+-			print_attribute(path, names[n], header_printed);
++			print_attribute(dirfd, pathname, fullname,
++					names[n], header_printed);
+ 	}
+ 	return 0;
+ }
+ 
+-int do_print(const char *path, const struct stat *stat, int walk_flags,
+-	     void *unused)
++static int do_print(int dirfd, const char *dirname, const char *pathname,
++		    unused unsigned char dirtype, enum walk_flags walk_flags,
++		    unused void *arg)
+ {
++	static char *__fullname;
++	const char *fullname;
+ 	int header_printed = 0;
+ 	int err = 0;
+ 
++	if (*dirname) {
++		free(__fullname);
++		__fullname = NULL;
++		if (asprintf(&__fullname, "%s%s", dirname, pathname) == -1) {
++			fprintf(stderr, "%s: %s", progname, strerror(errno));
++			return 1;
++		}
++		fullname = __fullname;
++	} else
++		fullname = pathname;
++
+ 	if (walk_flags & WALK_TREE_FAILED) {
+-		fprintf(stderr, "%s: %s: %s\n", progname, xquote(path, "\n\r"),
+-			strerror(errno));
++		fprintf(stderr, "%s: %s: %s\n", progname,
++			xquote(fullname, "\n\r"), strerror(errno));
+ 		return 1;
+ 	}
+ 
+ 	if (opt_name)
+-		err = print_attribute(path, opt_name, &header_printed);
++		err = print_attribute(dirfd, pathname, fullname,
++				      opt_name, &header_printed);
+ 	else
+-		err = list_attributes(path, &header_printed);
++		err = list_attributes(dirfd, pathname, fullname,
++				      &header_printed);
+ 
+ 	if (header_printed)
+ 		puts("");
+ 	return err;
+ }
+ 
+-void help(void)
++static void help(void)
+ {
+ 	printf(_("%s %s -- get extended attributes\n"),
+ 	       progname, VERSION);
+@@ -435,7 +444,7 @@
+ 				return 0;
+ 
+ 			case 'h': /* do not dereference symlinks */
+-				walk_flags &= ~WALK_TREE_DEREFERENCE;
++				at_flags |= AT_SYMLINK_NOFOLLOW;
+ 				break;
+ 
+ 			case 'n':  /* get named attribute */
+@@ -492,8 +501,8 @@
+ 	}
+ 
+ 	while (optind < argc) {
+-		had_errors += walk_tree(argv[optind], walk_flags, 0,
+-					do_print, NULL);
++		had_errors += walk_tree(argv[optind], walk_flags, do_print,
++					NULL);
+ 		optind++;
+ 	}
+ 
+--- a/tools/setfattr.c	2026-07-03 13:29:12.167814398 +0800
++++ b/tools/setfattr.c	2026-07-03 13:29:12.175091802 +0800
+@@ -30,19 +30,25 @@
+ #include <ctype.h>
+ #include <libgen.h>
+ #include <sys/xattr.h>
++#include <unistd.h>
++#include <fcntl.h>
+ #include <errno.h>
++#include "openat2.h"
+ 
++#include "xattrat_compat.h"
+ #include "misc.h"
+ 
+-#define CMD_LINE_OPTIONS "n:x:v:h"
++#define CMD_LINE_OPTIONS "n:x:v:hP"
+ #define CMD_LINE_SPEC1 "{-n name} [-v value] [-h] file..."
+ #define CMD_LINE_SPEC2 "{-x name} [-h] file..."
++#define CMD_LINE_SPEC3 "[-hP] --restore=file"
+ 
+ static const struct option long_options[] = {
+ 	{ "name",		1, 0, 'n' }, 
+ 	{ "remove",		1, 0, 'x' },
+ 	{ "value",		1, 0, 'v' },
+ 	{ "no-dereference",	0, 0, 'h' },
++	{ "physical",		0, 0, 'P' },
+ 	{ "restore",		1, 0, 'B' },
+ 	{ "raw",		0, 0, CHAR_MAX + 1 },
+ 	{ "version",		0, 0, 'V' },
+@@ -50,24 +56,25 @@
+ 	{ NULL,			0, 0, 0 }
+ };
+ 
+-char *opt_name;  /* attribute name to set */
+-char *opt_value;  /* attribute value */
+-int opt_set;  /* set an attribute */
+-int opt_remove;  /* remove an attribute */
+-int opt_restore;  /* restore has been run */
+-int opt_deref = 1;  /* dereference symbolic links */
+-int opt_raw;  /* attribute value is not encoded */
+-
+-int had_errors;
+-const char *progname;
+-
+-int do_set(const char *path, const char *name, const char *value);
+-const char *decode(const char *value, size_t *size);
+-int restore(const char *filename);
+-int hex_digit(char c);
+-int base64_digit(char c);
++static char *opt_name;  /* attribute name to set */
++static char *opt_value;  /* attribute value */
++static int opt_set;  /* set an attribute */
++static int opt_remove;  /* remove an attribute */
++static int opt_restore;  /* restore has been run */
++static int opt_deref = 1;  /* dereference symbolic links */
++static int opt_raw;  /* attribute value is not encoded */
++static int opt_physical;
++
++static int had_errors;
++static const char *progname;
++
++static int do_set(int dirfd, const char *pathname, const char *fullpath,
++		  const char *name, const char *value);
++static const char *decode(const char *value, size_t *size);
++static int hex_digit(char c);
++static int base64_digit(char c);
+ 
+-const char *strerror_ea(int err)
++static const char *strerror_ea(int err)
+ {
+ #ifdef __linux__
+ 	/* The Linux kernel does not define ENOATTR, but maps it to ENODATA. */
+@@ -87,25 +94,20 @@
+ 	return q;
+ }
+ 
+-int do_setxattr(const char *path, const char *name,
+-		const void *value, size_t size)
++static int restore(const char *filename)
+ {
+-	return (opt_deref ? setxattr : lsetxattr)(path, name, value, size, 0);
+-}
+-
+-int do_removexattr(const char *path, const char *name)
+-{
+-	return (opt_deref ? removexattr : lremovexattr)(path, name);
+-}
+-
+-int restore(const char *filename)
+-{
+-	static char *path;
+-	static size_t path_size;
++	char *fullpath = NULL;
++	size_t fullpath_size = 0;
+ 	FILE *file;
+ 	char *l;
+ 	int line = 0, backup_line, status = 0;
+-	
++	int dirfd = -1;
++	char *pathname, *dirname = NULL;
++#ifdef UNSAFE_RESTORE_WARNINGS
++	static int non_physical_restore_warning;
++	static int deref_restore_warning;
++#endif
++
+ 	if (strcmp(filename, "-") == 0)
+ 		file = stdin;
+ 	else {
+@@ -140,20 +142,85 @@
+ 		} else
+ 			l += 8;
+ 		l = unquote(l);
+-		if (high_water_alloc((void **)&path, &path_size, strlen(l)+1)) {
++		if (high_water_alloc((void **)&fullpath, &fullpath_size, strlen(l)+1)) {
+ 			perror(progname);
+ 			status = 1;
+ 			goto cleanup;
+ 		}
+-		strcpy(path, l);
++		strcpy(fullpath, l);
++
++#ifdef UNSAFE_RESTORE_WARNINGS
++		if (!opt_physical && !non_physical_restore_warning) {
++			fprintf(stderr,
++				_("Warning: option --restore=file is unsafe "
++				  "without option -P (--physical) as it "
++				  "traverses symbolic links in pathnames\n"));
++			non_physical_restore_warning = 1;
++		}
++		if (opt_deref && !deref_restore_warning) {
++			fprintf(stderr,
++				_("Warning: option --restore=file is unsafe "
++				  "without option -h (--no-dereference) as it "
++				  "dereferences symbolic link pathnames\n"));
++			deref_restore_warning = 1;
++		}
++#endif
++
++		/* find the last pathname component */
++		pathname = fullpath + strlen(fullpath);
++		while (pathname > fullpath && pathname[-1] == '/')
++			pathname--;
++		while (pathname > fullpath && pathname[-1] != '/')
++			pathname--;
++
++		if (opt_physical && pathname != fullpath) {
++			dirname = malloc(pathname - fullpath + 1);
++			if (dirname == NULL) {
++				fprintf(stderr, "%s: %s\n", progname,
++					strerror(errno));
++				status = 1;
++				goto cleanup;
++			}
++			memcpy(dirname, fullpath, pathname - fullpath);
++			dirname[pathname - fullpath] = '\0';
++#ifdef USE_OPENAT2
++			struct open_how how = {
++				.flags = O_PATH | O_DIRECTORY,
++				.resolve = RESOLVE_NO_SYMLINKS,
++			};
++
++			dirfd = openat2(AT_FDCWD, dirname, &how, sizeof(how));
++#else
++			errno = ENOSYS;
++			dirfd = -1;
++#endif
++			if (dirfd == -1) {
++				fprintf(stderr,
++					_("%s: lookup of directory %s without "
++					  "following symlinks: %s\n"),
++					progname, dirname, strerror(errno));
++				status = 1;
++				goto cleanup;
++			}
++		} else {
++			pathname = fullpath;
++			dirfd = AT_FDCWD;
++		}
+ 
+ 		while ((l = next_line(file)) != NULL && *l != '\0') {
+ 			char *name = l, *value = strchr(l, '=');
+ 			line++;
+ 			if (value)
+ 				*value++ = '\0';
+-			status = do_set(path, unquote(name), value);
++			status = do_set(dirfd, pathname, fullpath,
++					unquote(name), value);
+ 		}
++		if (dirfd != -1 && dirfd != AT_FDCWD) {
++			close(dirfd);
++			dirfd = -1;
++		}
++		free(dirname);
++		dirname = NULL;
+ 		if (l == NULL)
+ 			break;
+ 		line++;
+@@ -166,8 +233,12 @@
+ 	}
+ 
+ cleanup:
+-	if (path)
+-		free(path);
++	if (dirfd != -1 && dirfd != AT_FDCWD) {
++		close(dirfd);
++		dirfd = -1;
++	}
++	free(dirname);
++	free(fullpath);
+ 	if (file != stdin)
+ 		fclose(file);
+ 	if (status)
+@@ -175,16 +246,18 @@
+ 	return status;
+ }
+ 
+-void help(void)
++static void help(void)
+ {
+ 	printf(_("%s %s -- set extended attributes\n"), progname, VERSION);
+ 	printf(_("Usage: %s %s\n"), progname, CMD_LINE_SPEC1);
+ 	printf(_("       %s %s\n"), progname, CMD_LINE_SPEC2);
++	printf(_("       %s %s\n"), progname, CMD_LINE_SPEC3);
+ 	printf(_(
+ "  -n, --name=name         set the value of the named extended attribute\n"
+ "  -x, --remove=name       remove the named extended attribute\n"
+ "  -v, --value=value       use value as the attribute value\n"
+ "  -h, --no-dereference    do not dereference symbolic links\n"
++"  -P, --physical          do not traverse symbolic links during a restore\n"
+ "      --restore=file      restore extended attributes\n"
+ "      --raw               attribute value is not encoded\n"
+ "      --version           print version and exit\n"
+@@ -193,6 +266,8 @@
+ 
+ int main(int argc, char *argv[])
+ {
++	enum { UNDEFINED_MODE, SET_MODE, RESTORE_MODE } mode = UNDEFINED_MODE;
++	char **restore_args = NULL;
+ 	int opt;
+ 
+ 	progname = basename(argv[0]);
+@@ -206,6 +281,9 @@
+ 		                  long_options, NULL)) != -1) {
+ 		switch(opt) {
+ 			case 'n':  /* attribute name */
++				if (mode == RESTORE_MODE)
++					goto synopsis;
++				mode = SET_MODE;
+ 				if (opt_name || opt_remove)
+ 					goto synopsis;
+ 				opt_name = optarg;
+@@ -217,16 +295,25 @@
+ 				break;
+ 
+ 			case 'v':  /* attribute value */
++				if (mode == RESTORE_MODE)
++					goto synopsis;
++				mode = SET_MODE;
+ 				if (opt_value || opt_remove)
+ 					goto synopsis;
+ 				opt_value = optarg;
+ 				break;
+ 
+ 			case CHAR_MAX + 1:
++				if (mode == RESTORE_MODE)
++					goto synopsis;
++				mode = SET_MODE;
+ 				opt_raw = 1;
+ 				break;
+ 
+ 			case 'x':  /* remove attribute */
++				if (mode == RESTORE_MODE)
++					goto synopsis;
++				mode = SET_MODE;
+ 				if (opt_name || opt_set)
+ 					goto synopsis;
+ 				opt_name = optarg;
+@@ -234,8 +321,24 @@
+ 				break;
+ 
+ 			case 'B':  /* restore */
+-				opt_restore = 1;
+-				restore(optarg);
++				if (mode == SET_MODE)
++					goto synopsis;
++				mode = RESTORE_MODE;
++				opt_restore++;
++				restore_args = realloc(restore_args,
++					opt_restore * sizeof(*restore_args));
++				if (!restore_args) {
++					perror(progname);
++					exit(1);
++				}
++				restore_args[opt_restore - 1] = optarg;
++				break;
++
++			case 'P': /* --physical */
++				if (mode == SET_MODE)
++					goto synopsis;
++				mode = RESTORE_MODE;
++				opt_physical = 1;
+ 				break;
+ 
+ 			case 'V':
+@@ -253,23 +356,35 @@
+ 	if (!(((opt_remove || opt_set) && optind < argc) || opt_restore))
+ 		goto synopsis;
+ 
++	if (mode == RESTORE_MODE) {
++		for (opt = 0; opt < opt_restore; opt++)
++			restore(restore_args[opt]);
++		free(restore_args);
++	}
++
+ 	while (optind < argc) {
+-		do_set(argv[optind], unquote(opt_name), opt_value);
++		if (mode == RESTORE_MODE)
++			goto synopsis;
++		mode = SET_MODE;
++		do_set(AT_FDCWD, argv[optind], argv[optind], unquote(opt_name),
++		       opt_value);
+ 		optind++;
+ 	}
+ 
+ 	return (had_errors ? 1 : 0);
+ 
+ synopsis:
+-	fprintf(stderr, _("Usage: %s %s\n"
+-			  "       %s %s\n"
+-	                  "Try `%s --help' for more information.\n"),
+-		progname, CMD_LINE_SPEC1, progname, CMD_LINE_SPEC2, progname);
++	fprintf(stderr, _("Usage: %s %s\n"), progname, CMD_LINE_SPEC1);
++	fprintf(stderr, _("       %s %s\n"), progname, CMD_LINE_SPEC2);
++	fprintf(stderr, _("       %s %s\n"), progname, CMD_LINE_SPEC3);
++	fprintf(stderr, _("Try `%s --help' for more information.\n"), progname);
+ 	return 2;
+ }
+ 
+-int do_set(const char *path, const char *name, const char *value)
++static int do_set(int dirfd, const char *pathname, const char *fullpath,
++		  const char *name, const char *value)
+ {
++	int at_flags = opt_deref ? 0 : AT_SYMLINK_NOFOLLOW;
+ 	size_t size = 0;
+ 	int error;
+ 
+@@ -281,20 +396,21 @@
+ 			return 1;
+ 	}
+ 	if (opt_set || opt_restore)
+-		error = do_setxattr(path, name, value, size);
++		error = setxattrat(dirfd, pathname, at_flags,
++				   name, value, size, 0);
+ 	else
+-		error = do_removexattr(path, name);
++		error = removexattrat(dirfd, pathname, at_flags, name);
+ 
+ 	if (error < 0) {
+ 		fprintf(stderr, "%s: %s: %s\n",
+-			progname, xquote(path, "\n\r"), strerror_ea(errno));
++			progname, xquote(fullpath, "\n\r"), strerror_ea(errno));
+ 		had_errors++;
+ 		return 1;
+ 	}
+ 	return 0;
+ }
+ 
+-const char *decode(const char *value, size_t *size)
++static const char *decode(const char *value, size_t *size)
+ {
+ 	static char *decoded;
+ 	static size_t decoded_size;
+@@ -444,7 +560,7 @@
+ 	return decoded;
+ }
+ 
+-int hex_digit(char c)
++static int hex_digit(char c)
+ {
+ 	if (c >= '0' && c <= '9')
+ 		return c - '0';
+@@ -456,7 +572,7 @@
+ 		return -1;
+ }
+ 
+-int base64_digit(char c)
++static int base64_digit(char c)
+ {
+ 	if (c >= 'A' && c <= 'Z')
+ 		return c - 'A';
+--- a/man/man1/getfattr.1	2026-07-03 13:29:12.169562186 +0800
++++ b/man/man1/getfattr.1	2026-07-03 13:29:12.176091786 +0800
+@@ -79,8 +79,7 @@
+ .TP
+ .BR \-h ", " \-\-no-dereference
+ Do not dereference symlinks. Instead of the file a symlink refers to, the
+-symlink itself is examined.  Unless doing a logical (\-L) traversal, do not
+-traverse symlinks to directories.
++symlink itself is examined.
+ .TP
+ .BR \-m " \f2pattern\f1, " \-\-match "=\f2pattern\f1"
+ Only include attributes with names matching the regular expression
+@@ -102,18 +101,19 @@
+ .TP
+ .BR \-R ", " \-\-recursive
+ List the attributes of all files and directories recursively.
++This option is commonly used together with option \-h.
+ .TP
+ .BR \-L ", " \-\-logical
+-Logical walk, follow symbolic links to directories.
+-The default behaviour is to follow symbolic link arguments unless
+-\-\-no\-dereference is given, and to skip symbolic links encountered in
+-subdirectories.
++Logical walk, recurse into symbolic links that refer to a directory.
+ Only effective in combination with \-R.
++The default behaviour is to recurse into symbolic links given on the command
++line, and not to recurse into symbolic links encountered in subdirectories.
+ .TP
+ .BR \-P ", " \-\-physical
+-Physical walk, do not follow symbolic links to directories.
+-This also skips symbolic link arguments.
++Physical walk, do not recurse into symbolic links that refer to a directory.
+ Only effective in combination with \-R.
++(For pathnames given on the command line, this option applies only to the final
++component; preceding path components may still be symbolic links.)
+ .TP
+ .B \-\-version
+ Print the version of
+--- a/man/man1/setfattr.1	2026-07-03 13:29:12.171667576 +0800
++++ b/man/man1/setfattr.1	2026-07-03 13:29:12.177091771 +0800
+@@ -30,7 +30,7 @@
+ .nf
+ \f3setfattr\f1 [\f3\-h\f1] \f3\-n name\f1 [\f3\-v value\f1] \f3pathname\f1...
+ \f3setfattr\f1 [\f3\-h\f1] \f3\-x name\f1 \f3pathname\f1...
+-\f3setfattr\f1 [\f3\-h\f1] \f3\-\-restore=file\f1
++\f3setfattr\f1 [\f3\-hP\f1] \f3\-\-restore=file\f1
+ .fi
+ .SH DESCRIPTION
+ The 
+@@ -62,8 +62,11 @@
+ .BR \-h ", " \-\-no-dereference
+ Do not follow symlinks.  If
+ .I pathname
+-is a symbolic link, it is not followed, but is instead itself the
+-inode being modified.
++is a symbolic link, it is not followed, but is instead modified itself.
++.TP
++.BR \-P ", " \-\-physical
++Do not traverse symbolic links in pathnames during a restore.  Can be combined
++with option \-h.
+ .TP
+ .BR \-\-restore =\f2file\f1
+ Restores extended attributes from file.
+--- a/test/Makemodule.am	2026-07-03 13:29:12.173963691 +0800
++++ b/test/Makemodule.am	2026-07-03 13:29:12.178091755 +0800
+@@ -1,6 +1,13 @@
++TEST_EXTENSIONS = .run
++
+ TESTS = \
+-	test/attr.test \
+-	test/root/getfattr.test
++	test/attr.run \
++	test/root/getfattr.run
++
++if UNSAFE_RESTORE_WARNINGS
++TESTS += \
++	test/restore.run
++endif
+ 
+ EXTRA_DIST += \
+ 	test/README \
+@@ -9,5 +16,7 @@
+ 	$(TESTS)
+ 
+ # Make sure translations don't break tests when matching output.
+-AM_TESTS_ENVIRONMENT = PATH="$(abs_top_builddir):$$PATH"; export LC_MESSAGES=C;
+-TEST_LOG_COMPILER = $(srcdir)/test/run
++AM_TESTS_ENVIRONMENT = \
++	export LC_MESSAGES=C; \
++	PATH="$(abs_top_builddir):$$PATH";
++RUN_LOG_COMPILER = $(srcdir)/test/run
+--- /dev/null	2026-07-03 11:23:39.371485832 +0800
++++ b/test/restore.run	2026-07-03 13:29:12.177091771 +0800
+@@ -0,0 +1,19 @@
++	$ mkdir d
++	$ touch d/f
++	$ touch d/l
++	$ setfattr -n user.name -v value d/f
++	$ [ "$(id -u)" != 0 ] || setfattr -h -n trusted.name -v value d/l
++
++	$ getfattr -RP d > physical
++
++	$ setfattr --restore=physical
++	> Warning: option --restore=file is unsafe without option -P (--physical) as it traverses symbolic links in pathnames
++	> Warning: option --restore=file is unsafe without option -h (--no-dereference) as it dereferences symbolic link pathnames
++
++	$ setfattr --restore=physical -h
++	> Warning: option --restore=file is unsafe without option -P (--physical) as it traverses symbolic links in pathnames
++
++	$ setfattr --restore=physical --physical
++	> Warning: option --restore=file is unsafe without option -h (--no-dereference) as it dereferences symbolic link pathnames
++
++	$ setfattr --restore=physical -h --physical

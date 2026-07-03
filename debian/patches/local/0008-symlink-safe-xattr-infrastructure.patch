@@ -1,0 +1,783 @@
+Description: Add walk_tree, openat2, xattrat infrastructure for attr
+ Backport infrastructure changes from upstream needed for CVE-2026-54371 fix.
+Author: Andreas Gruenbacher <agruenba@redhat.com>
+Origin: upstream, https://git.savannah.nongnu.org/git/attr.git
+Forwarded: not-needed
+Last-Update: 2026-07-03
+---
+
+diff --git a/include/misc.h b/include/misc.h
+index 8b8ec48..3a14ca2 100644
+--- a/include/misc.h
++++ b/include/misc.h
+@@ -15,6 +15,8 @@
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
++#define unused __attribute__ ((unused))
++
+ extern int high_water_alloc(void **buf, size_t *bufsize, size_t newsize);
+ 
+ extern const char *quote(const char *str, const char *quote_chars);
+diff --git a/include/old_walk_tree.h b/include/old_walk_tree.h
+deleted file mode 100644
+index cac6e07..0000000
+--- a/include/old_walk_tree.h
++++ /dev/null
+@@ -1,40 +0,0 @@
+-/*
+-  File: old_walk_tree.h
+-
+-  Copyright (C) 2007 Andreas Gruenbacher <a.gruenbacher@computer.org>
+-
+-  This program is free software; you can redistribute it and/or modify it under
+-  the terms of the GNU Lesser General Public License as published by the
+-  Free Software Foundation; either version 2.1 of the License, or (at
+-  your option) any later version.
+-
+-  This program is distributed in the hope that it will be useful, but WITHOUT
+-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public
+-  License for more details.
+-
+-  You should have received a copy of the GNU Lesser General Public
+-  License along with this program.  If not, see <http://www.gnu.org/licenses/>.
+-*/
+-
+-#ifndef __WALK_TREE_H
+-#define __WALK_TREE_H
+-
+-#define WALK_TREE_RECURSIVE		0x01
+-#define WALK_TREE_PHYSICAL		0x02
+-#define WALK_TREE_LOGICAL		0x04
+-#define WALK_TREE_DEREFERENCE		0x08
+-#define WALK_TREE_DEREFERENCE_TOPLEVEL	0x10
+-#define WALK_TREE_ONE_FILESYSTEM	0x20
+-
+-#define WALK_TREE_TOPLEVEL	0x100
+-#define WALK_TREE_SYMLINK	0x200
+-#define WALK_TREE_FAILED	0x400
+-
+-struct stat;
+-
+-extern int old_walk_tree(const char *path, int walk_flags, unsigned int num,
+-		     int (*func)(const char *, const struct stat *, int,
+-				 void *), void *arg);
+-
+-#endif
+diff --git a/include/openat2.h b/include/openat2.h
+new file mode 100644
+index 0000000..d267895
+--- /dev/null
++++ b/include/openat2.h
+@@ -0,0 +1,16 @@
++#ifndef MISC_OPENAT2_H
++#define MISC_OPENAT2_H
++
++#include "config.h"
++#include <stdint.h>
++
++#ifdef USE_OPENAT2
++#include <linux/openat2.h>
++
++#ifndef HAVE_OPENAT2
++int openat2(int dirfd, const char *pathname, const struct open_how *how,
++	    size_t size);
++#endif
++#endif
++
++#endif /* MISC_OPENAT2_H */
+diff --git a/include/walk_tree.h b/include/walk_tree.h
+new file mode 100644
+index 0000000..60df8da
+--- /dev/null
++++ b/include/walk_tree.h
+@@ -0,0 +1,40 @@
++/*
++  File: walk_tree.h
++
++  Copyright (C) 2007-2026 Andreas Gruenbacher <a.gruenbacher@computer.org>
++
++  This library is free software; you can redistribute it and/or
++  modify it under the terms of the GNU Lesser General Public
++  License as published by the Free Software Foundation; either
++  version 2.1 of the License, or (at your option) any later version.
++
++  This library is distributed in the hope that it will be useful,
++  but WITHOUT ANY WARRANTY; without even the implied warranty of
++  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++  Lesser General Public License for more details.
++
++  You should have received a copy of the GNU Lesser General Public
++  License along with this library; if not, see <https://www.gnu.org/licenses/>.
++*/
++
++#ifndef __WALK_TREE_H
++#define __WALK_TREE_H
++
++enum walk_flags {
++	WALK_TREE_RECURSIVE = 0x01,
++	WALK_TREE_PHYSICAL = 0x02,
++	WALK_TREE_LOGICAL = 0x04,
++	WALK_TREE_ONE_FILESYSTEM = 0x08,
++
++	WALK_TREE_TOPLEVEL = 0x100,
++	WALK_TREE_FAILED = 0x200,
++};
++
++struct stat;
++
++extern int walk_tree(const char *pathname, enum walk_flags walk_flags,
++		     int (*func)(int, const char *, const char *,
++				 unsigned char, enum walk_flags, void *),
++		     void *arg);
++
++#endif
+diff --git a/libmisc/old_walk_tree.c b/libmisc/old_walk_tree.c
+deleted file mode 100644
+index 564c3b4..0000000
+--- a/libmisc/old_walk_tree.c
++++ /dev/null
+@@ -1,259 +0,0 @@
+-/*
+-  File: old_walk_tree.c
+-
+-  Copyright (C) 2007 Andreas Gruenbacher <a.gruenbacher@computer.org>
+-
+-  This program is free software; you can redistribute it and/or modify it under
+-  the terms of the GNU Lesser General Public License as published by the
+-  Free Software Foundation; either version 2.1 of the License, or (at
+-  your option) any later version.
+-
+-  This program is distributed in the hope that it will be useful, but WITHOUT
+-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public
+-  License for more details.
+-
+-  You should have received a copy of the GNU Lesser General Public
+-  License along with this program.  If not, see <http://www.gnu.org/licenses/>.
+-*/
+-
+-#include "config.h"
+-
+-#include <sys/types.h>
+-#include <sys/stat.h>
+-#include <unistd.h>
+-#include <sys/time.h>
+-#include <sys/resource.h>
+-#include <dirent.h>
+-#include <stdio.h>
+-#include <string.h>
+-#include <errno.h>
+-
+-#include "old_walk_tree.h"
+-
+-struct entry_handle {
+-	struct entry_handle *prev, *next;
+-	dev_t dev;
+-	ino_t ino;
+-	DIR *stream;
+-	long pos;
+-};
+-
+-struct walk_tree_args {
+-	char path[FILENAME_MAX];
+-	int walk_flags;
+-	int (*func)(const char *, const struct stat *, int, void *);
+-	void *arg;
+-	int depth;
+-	struct entry_handle dirs;
+-	struct entry_handle *closed;
+-	unsigned int num_dir_handles;
+-	struct stat st;
+-	dev_t dev;
+-};
+-
+-static int walk_tree_visited(struct entry_handle *dirs, dev_t dev, ino_t ino)
+-{
+-	struct entry_handle *i;
+-
+-	for (i = dirs->next; i != dirs; i = i->next)
+-		if (i->dev == dev && i->ino == ino)
+-			return 1;
+-	return 0;
+-}
+-
+-static int walk_tree_rec(struct walk_tree_args *args)
+-{
+-	int follow_symlinks = (args->walk_flags & WALK_TREE_LOGICAL) ||
+-			      ((args->walk_flags & WALK_TREE_DEREFERENCE) &&
+-			       !(args->walk_flags & WALK_TREE_PHYSICAL) &&
+-			       args->depth == 0);
+-	int have_dir_stat = 0, flags = args->walk_flags, err;
+-	struct entry_handle dir;
+-
+-	/*
+-	 * If (walk_flags & WALK_TREE_PHYSICAL), do not traverse symlinks.
+-	 * If (walk_flags & WALK_TREE_LOGICAL), traverse all symlinks.
+-	 * Otherwise, traverse only top-level symlinks.
+-	 */
+-	if (args->depth == 0)
+-		flags |= WALK_TREE_TOPLEVEL;
+-
+-	if (lstat(args->path, &args->st) != 0)
+-		return args->func(args->path, NULL, flags | WALK_TREE_FAILED,
+-				  args->arg);
+-
+-	if (flags & WALK_TREE_ONE_FILESYSTEM) {
+-		if (args->dev == 0)
+-			args->dev = args->st.st_dev;
+-		else if (args->st.st_dev != args->dev)
+-			return 0;
+-	}
+-
+-	if (S_ISLNK(args->st.st_mode)) {
+-		flags |= WALK_TREE_SYMLINK;
+-		if ((flags & WALK_TREE_DEREFERENCE) ||
+-		    ((flags & WALK_TREE_TOPLEVEL) &&
+-		     (flags & WALK_TREE_DEREFERENCE_TOPLEVEL))) {
+-			if (stat(args->path, &args->st) != 0)
+-				return args->func(args->path, NULL,
+-						  flags | WALK_TREE_FAILED,
+-						  args->arg);
+-			dir.dev = args->st.st_dev;
+-			dir.ino = args->st.st_ino;
+-			have_dir_stat = 1;
+-		}
+-	} else if (S_ISDIR(args->st.st_mode)) {
+-		dir.dev = args->st.st_dev;
+-		dir.ino = args->st.st_ino;
+-		have_dir_stat = 1;
+-	}
+-	err = args->func(args->path, &args->st, flags, args->arg);
+-
+-	/*
+-	 * Recurse if WALK_TREE_RECURSIVE and the path is:
+-	 *      a dir not from a symlink
+-	 *      a link and follow_symlinks
+-	 */
+-        if ((flags & WALK_TREE_RECURSIVE) &&
+-	    ((!(flags & WALK_TREE_SYMLINK) && S_ISDIR(args->st.st_mode)) ||
+-	     ((flags & WALK_TREE_SYMLINK) && follow_symlinks))) {
+-		struct dirent *entry;
+-
+-		/*
+-		 * Check if we have already visited this directory to break
+-		 * endless loops.
+-		 *
+-		 * If we haven't stat()ed the file yet, do an opendir() for
+-		 * figuring out whether we have a directory, and check whether
+-		 * the directory has been visited afterwards. This saves a
+-		 * system call for each non-directory found.
+-		 */
+-		if (have_dir_stat && walk_tree_visited(&args->dirs, dir.dev, dir.ino))
+-			return err;
+-
+-		if (args->num_dir_handles == 0 && args->closed->prev != &args->dirs) {
+-close_another_dir:
+-			/* Close the topmost directory handle still open. */
+-			args->closed = args->closed->prev;
+-			args->closed->pos = telldir(args->closed->stream);
+-			closedir(args->closed->stream);
+-			args->closed->stream = NULL;
+-			args->num_dir_handles++;
+-		}
+-
+-		dir.stream = opendir(args->path);
+-		if (!dir.stream) {
+-			if (errno == ENFILE && args->closed->prev != &args->dirs) {
+-				/* Ran out of file descriptors. */
+-				args->num_dir_handles = 0;
+-				goto close_another_dir;
+-			}
+-
+-			/*
+-			 * PATH may be a symlink to a regular file, or a dead
+-			 * symlink which we didn't follow above.
+-			 */
+-			if (errno != ENOTDIR && errno != ENOENT)
+-				err += args->func(args->path, NULL, flags |
+-						 WALK_TREE_FAILED, args->arg);
+-			return err;
+-		}
+-
+-		/* See walk_tree_visited() comment above... */
+-		if (!have_dir_stat) {
+-			if (stat(args->path, &args->st) != 0)
+-				goto skip_dir;
+-			dir.dev = args->st.st_dev;
+-			dir.ino = args->st.st_ino;
+-			if (walk_tree_visited(&args->dirs, dir.dev, dir.ino))
+-				goto skip_dir;
+-		}
+-
+-		/* Insert into the list of handles. */
+-		dir.next = args->dirs.next;
+-		dir.prev = &args->dirs;
+-		dir.prev->next = &dir;
+-		dir.next->prev = &dir;
+-		args->num_dir_handles--;
+-
+-		while ((entry = readdir(dir.stream)) != NULL) {
+-			char *path_end;
+-
+-			if (!strcmp(entry->d_name, ".") ||
+-			    !strcmp(entry->d_name, ".."))
+-				continue;
+-			path_end = strchr(args->path, 0);
+-			if ((path_end - args->path) + strlen(entry->d_name) + 1 >=
+-			    FILENAME_MAX) {
+-				errno = ENAMETOOLONG;
+-				err += args->func(args->path, NULL,
+-						  flags | WALK_TREE_FAILED,
+-						  args->arg);
+-				continue;
+-			}
+-			*path_end++ = '/';
+-			strcpy(path_end, entry->d_name);
+-			args->depth++;
+-			err += walk_tree_rec(args);
+-			args->depth--;
+-			*--path_end = 0;
+-			if (!dir.stream) {
+-				/* Reopen the directory handle. */
+-				dir.stream = opendir(args->path);
+-				if (!dir.stream)
+-					return err + args->func(args->path,
+-								NULL,
+-								flags | WALK_TREE_FAILED,
+-								args->arg);
+-				seekdir(dir.stream, dir.pos);
+-
+-				args->closed = args->closed->next;
+-				args->num_dir_handles--;
+-			}
+-		}
+-
+-		/* Remove from the list of handles. */
+-		dir.prev->next = dir.next;
+-		dir.next->prev = dir.prev;
+-		args->num_dir_handles++;
+-
+-	skip_dir:
+-		if (closedir(dir.stream) != 0)
+-			err += args->func(args->path, NULL,
+-					 flags | WALK_TREE_FAILED, args->arg);
+-	}
+-	return err;
+-}
+-
+-int old_walk_tree(const char *path, int walk_flags, unsigned int num,
+-	      int (*func)(const char *, const struct stat *, int, void *),
+-	      void *arg)
+-{
+-	struct walk_tree_args args;
+-
+-	args.num_dir_handles = num;
+-	if (args.num_dir_handles < 1) {
+-		struct rlimit rlimit;
+-
+-		args.num_dir_handles = 1;
+-		if (getrlimit(RLIMIT_NOFILE, &rlimit) == 0 &&
+-		    rlimit.rlim_cur >= 2)
+-			args.num_dir_handles = rlimit.rlim_cur / 2;
+-	}
+-	args.dirs.next = &args.dirs;
+-	args.dirs.prev = &args.dirs;
+-	args.closed = &args.dirs;
+-	if (strlen(path) >= FILENAME_MAX) {
+-		errno = ENAMETOOLONG;
+-		return func(path, NULL, WALK_TREE_FAILED, arg);
+-	}
+-	strcpy(args.path, path);
+-	args.walk_flags = walk_flags;
+-	args.func = func;
+-	args.arg = arg;
+-	args.depth = 0;
+-	args.dev = 0;
+-
+-	return walk_tree_rec(&args);
+-}
+diff --git a/libmisc/openat2.c b/libmisc/openat2.c
+new file mode 100644
+index 0000000..bdc78e1
+--- /dev/null
++++ b/libmisc/openat2.c
+@@ -0,0 +1,30 @@
++/*
++  File: openat2.c
++
++  Copyright (C) 2026 Andreas Gruenbacher <andreas.gruenbacher@gmail.com>
++
++  This library is free software; you can redistribute it and/or
++  modify it under the terms of the GNU Lesser General Public
++  License as published by the Free Software Foundation; either
++  version 2.1 of the License, or (at your option) any later version.
++
++  This library is distributed in the hope that it will be useful,
++  but WITHOUT ANY WARRANTY; without even the implied warranty of
++  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++  Lesser General Public License for more details.
++
++  You should have received a copy of the GNU Lesser General Public
++  License along with this library; if not, see <https://www.gnu.org/licenses/>.
++*/
++
++#include "config.h"
++#include <sys/syscall.h>
++#include <unistd.h>
++
++#include "openat2.h"
++
++int openat2(int dirfd, const char *pathname, const struct open_how *how,
++	    size_t size)
++{
++	return syscall(__NR_openat2, dirfd, pathname, how, size);
++}
+diff --git a/libmisc/walk_tree.c b/libmisc/walk_tree.c
+new file mode 100644
+index 0000000..5b1b576
+--- /dev/null
++++ b/libmisc/walk_tree.c
+@@ -0,0 +1,340 @@
++/*
++  File: walk_tree.c
++
++  Copyright (C) 2007-2026 Andreas Gruenbacher <a.gruenbacher@computer.org>
++
++  This library is free software; you can redistribute it and/or
++  modify it under the terms of the GNU Lesser General Public
++  License as published by the Free Software Foundation; either
++  version 2.1 of the License, or (at your option) any later version.
++
++  This library is distributed in the hope that it will be useful,
++  but WITHOUT ANY WARRANTY; without even the implied warranty of
++  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++  Lesser General Public License for more details.
++
++  You should have received a copy of the GNU Lesser General Public
++  License along with this library; if not, see <https://www.gnu.org/licenses/>.
++*/
++
++#include "config.h"
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <sys/time.h>
++#include <sys/resource.h>
++#include <dirent.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <errno.h>
++
++#include "walk_tree.h"
++
++struct dir_stack_entry {
++	struct dir_stack_entry *parent;
++	DIR *stream;
++	long pos;
++	dev_t dev;
++	ino_t ino;
++};
++
++struct dir_hash_entry {
++	struct dir_hash_entry *next;
++	dev_t dev;
++	ino_t ino;
++};
++
++#define DIR_HASH_SIZE 128
++
++struct walk_tree_args {
++	enum walk_flags walk_flags;
++	int (*func)(int, const char *, const char *, unsigned char,
++		    enum walk_flags, void *);
++	void *arg;
++	int depth;
++	unsigned int num_dir_handles;
++	dev_t dev;
++	struct dir_hash_entry **dir_hash;
++};
++
++static int dir_visited(struct dir_stack_entry *entry, dev_t dev, ino_t ino)
++{
++	while (entry) {
++		if (entry->dev == dev && entry->ino == ino)
++			  return 1;
++		entry = entry->parent;
++	}
++	return 0;
++}
++
++static unsigned int dir_hash(dev_t dev, ino_t ino)
++{
++	return (dev ^ ino) % DIR_HASH_SIZE;
++}
++
++static int dir_hash_insert_unique(struct walk_tree_args *args, struct stat *st)
++{
++	unsigned int bucket = dir_hash(st->st_dev, st->st_ino);
++	struct dir_hash_entry *entry;
++
++	if (!args->dir_hash) {
++		/* allocate the directory hash table */
++		args->dir_hash = calloc(DIR_HASH_SIZE, sizeof(*args->dir_hash));
++		if (!args->dir_hash)
++			return -1;
++	}
++
++	entry = args->dir_hash[bucket];
++	while (entry) {
++		if (entry->dev == st->st_dev && entry->ino == st->st_ino)
++			return 1;
++		entry = entry->next;
++	}
++
++	entry = malloc(sizeof(*entry));
++	if (!entry)
++		return -1;
++
++	entry->dev = st->st_dev;
++	entry->ino = st->st_ino;
++	entry->next = args->dir_hash[bucket];
++	args->dir_hash[bucket] = entry;
++	return 0;
++}
++
++static char *new_dirname(const char *dirname, const char *pathname)
++{
++	size_t dirlen, pathlen;
++	char *newname, *n;
++	int need_slash;
++
++	if (*dirname == '\0' && *pathname == '.' &&
++	    (*(pathname+1) == '/' || *(pathname+1) == '\0')) {
++		pathname++;
++		while (*pathname == '/')
++			pathname++;
++	}
++
++	dirlen = strlen(dirname);
++	pathlen = strlen(pathname);
++	need_slash = (pathlen > 0 && pathname[pathlen - 1] != '/');
++	n = newname = malloc(dirlen + pathlen + need_slash + 1);
++	if (newname == NULL)
++		return NULL;
++	memcpy(n, dirname, dirlen);
++	n += dirlen;
++	memcpy(n, pathname, pathlen);
++	n += pathlen;
++	if (need_slash)
++		*n++ = '/';
++	*n++ = '\0';
++	return newname;
++}
++
++static int walk_tree_rec(int dirfd, const char *dirname, const char *pathname,
++			 unsigned char dirtype, struct walk_tree_args *args,
++			 struct dir_stack_entry *parent_dir)
++{
++	enum walk_flags walk_flags = args->walk_flags;
++	struct dir_stack_entry this_dir = {
++		.parent = parent_dir,
++	};
++	int follow;
++	struct stat st;
++	char *mydirname = NULL;
++	int dir_open_flags;
++	int fd = -1;
++	struct dirent *entry;
++	int err = 0;
++
++	if (args->depth == 0)
++		walk_flags |= WALK_TREE_TOPLEVEL;
++
++	follow = (walk_flags & WALK_TREE_LOGICAL) ||
++		 (!(walk_flags & WALK_TREE_PHYSICAL) && !args->depth);
++
++	if (!(walk_flags & WALK_TREE_RECURSIVE) ||
++	    (dirtype != DT_UNKNOWN &&
++	     dirtype != DT_DIR &&
++	     (dirtype != DT_LNK ||
++	      ((walk_flags & WALK_TREE_PHYSICAL) &&
++	       !(walk_flags & WALK_TREE_TOPLEVEL)))))
++		goto visit_this;
++
++	if (args->num_dir_handles == 0) {
++		struct dir_stack_entry *top;
++
++close_another_parent:
++		/* Close the topmost parent directory handle still open. */
++		top = parent_dir;
++		if (!top || !top->stream) {
++			errno = ENFILE;
++			goto fail;
++		}
++		while (top->parent && top->parent->stream)
++			top = top->parent;
++		top->pos = telldir(top->stream);
++		closedir(top->stream);
++		top->stream = NULL;
++		args->num_dir_handles++;
++	}
++
++	dir_open_flags = O_RDONLY | O_DIRECTORY | (follow ? 0 : O_NOFOLLOW);
++	fd = openat(dirfd, pathname, dir_open_flags);
++	if (fd == -1) {
++		if (errno == ENOTDIR || errno == ENOENT || errno == ELOOP)
++			goto visit_this;
++		if (errno != ENFILE)
++			goto fail;
++		/* Ran out of file descriptors. */
++		args->num_dir_handles = 0;
++		goto close_another_parent;
++	}
++	args->num_dir_handles--;
++	if (dirtype == DT_UNKNOWN && !follow)
++		dirtype = DT_DIR;
++
++	if (fstat(fd, &st) == -1)
++		goto fail;
++	if (walk_flags & WALK_TREE_ONE_FILESYSTEM) {
++		if (args->dev == 0)
++			args->dev = st.st_dev;
++		else if (st.st_dev != args->dev)
++			goto dir_visited;
++	}
++
++	if (walk_flags & WALK_TREE_LOGICAL) {
++		if (dir_visited(parent_dir, st.st_dev, st.st_ino))
++			goto dir_visited;
++		this_dir.dev = st.st_dev;
++		this_dir.ino = st.st_ino;
++	} else {
++		int ret = dir_hash_insert_unique(args, &st);
++		if (ret == 1)
++			goto dir_visited;
++		if (ret == -1)
++			goto fail;
++	}
++	goto visit_this;
++
++dir_visited:
++	close(fd);
++	fd = -1;
++	if (dirtype == DT_UNKNOWN) {
++		if (fstatat(dirfd, pathname, &st, AT_SYMLINK_NOFOLLOW) == -1)
++			goto fail;
++		dirtype = IFTODT(st.st_mode);
++	}
++	if (dirtype == DT_DIR)
++		goto out;
++
++visit_this:
++	err += args->func(dirfd, dirname, pathname, dirtype,
++			  walk_flags, args->arg);
++
++	if (fd == -1)
++		goto out;
++	this_dir.stream = fdopendir(fd);
++	if (this_dir.stream == NULL)
++		goto fail;
++
++	mydirname = new_dirname(dirname, pathname);
++	if (mydirname == NULL)
++		goto fail;
++
++	args->depth++;
++	while ((entry = readdir(this_dir.stream)) != NULL) {
++		if (!strcmp(entry->d_name, ".") ||
++		    !strcmp(entry->d_name, ".."))
++			continue;
++
++		err += walk_tree_rec(fd, mydirname, entry->d_name,
++				     entry->d_type, args, &this_dir);
++
++		if (!this_dir.stream) {
++			/* Reopen the directory handle. */
++			fd = openat(dirfd, pathname, dir_open_flags);
++			if (fd == -1)
++				goto fail_depth;
++			args->num_dir_handles--;
++			this_dir.stream = fdopendir(fd);
++			if (!this_dir.stream)
++				goto fail_depth;
++			seekdir(this_dir.stream, this_dir.pos);
++		}
++	}
++	args->depth--;
++
++	if (closedir(this_dir.stream) != 0) {
++		this_dir.stream = NULL;
++		goto fail;
++	}
++	this_dir.stream = NULL;
++
++out:
++	free(mydirname);
++	if (this_dir.stream) {
++		closedir(this_dir.stream);
++		args->num_dir_handles++;
++		fd = -1;
++	}
++	if (fd != -1) {
++		close(fd);
++		args->num_dir_handles++;
++	}
++	return err;
++
++fail:
++	err += args->func(dirfd, dirname, pathname, dirtype,
++			  walk_flags | WALK_TREE_FAILED, args->arg);
++	goto out;
++
++fail_depth:
++	args->depth--;
++	goto fail;
++}
++
++/*
++ * If (walk_flags & WALK_TREE_PHYSICAL), do not traverse symlinks.
++ * If (walk_flags & WALK_TREE_LOGICAL), traverse all symlinks.
++ * Otherwise, traverse only top-level symlinks.
++ */
++int walk_tree(const char *pathname, enum walk_flags walk_flags,
++	      int (*func)(int, const char *, const char *, unsigned char,
++			  enum walk_flags, void *),
++	      void *arg)
++{
++	struct walk_tree_args args = {
++		.walk_flags = walk_flags,
++		.func = func,
++		.arg = arg,
++	};
++	struct rlimit rlimit;
++	int err;
++
++	/* number of directory file descriptors to keep open at a time */
++	if (getrlimit(RLIMIT_NOFILE, &rlimit) != 0)
++		rlimit.rlim_cur = 0;
++	args.num_dir_handles = rlimit.rlim_cur / 4 + 1;
++
++	err = walk_tree_rec(AT_FDCWD, "", pathname, DT_UNKNOWN, &args, NULL);
++
++	if (args.dir_hash) {
++		/* destroy the directory hash table */
++		int n;
++
++		for (n = 0; n < DIR_HASH_SIZE; n++) {
++			struct dir_hash_entry *entry = args.dir_hash[n];
++			while (entry) {
++				struct dir_hash_entry *next = entry->next;
++				free(entry);
++				entry = next;
++			}
++		}
++		free(args.dir_hash);
++	}
++
++	return err;
++}
+
